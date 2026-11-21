@@ -1,0 +1,474 @@
+// ============================================================
+// Prisma Schema — نظام إدارة دوام الفنادق
+// ============================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// Enums
+// ============================================================
+
+enum UserRole {
+  ADMIN
+  VIEWER
+  EMPLOYEE_KIOSK
+}
+
+enum PunchType {
+  IN
+  OUT
+}
+
+enum PunchSource {
+  DEVICE
+  ADMIN_CORRECTION
+}
+
+enum FinancialTransactionType {
+  DOUBLE_DUE
+  LATE_CLAIM
+  PAYMENT_MADE
+  PAYMENT_RECEIVED
+  TIME_COMP
+}
+
+enum LateClaimStatus {
+  PENDING
+  PARTIALLY_COMPENSATED
+  FULLY_COMPENSATED
+  CANCELLED
+}
+
+enum AttendanceStatus {
+  PRESENT
+  ABSENT
+  LATE
+  PARTIAL
+  DAY_OFF
+}
+
+enum ErrorCaseType {
+  MISSING_CHECK_IN
+  MISSING_CHECK_OUT
+  DUPLICATE_PUNCH
+  WRONG_HOTEL
+  UNAUTHORIZED_HOTEL
+  INCOMPLETE_SHIFT
+  UNREGISTERED_DOUBLE
+}
+
+// ============================================================
+// 1. المستخدمون (أدمن + مدراء)
+// ============================================================
+model User {
+  id            String   @id @default(cuid())
+  username      String   @unique
+  email         String?  @unique
+  password_hash String
+  role          UserRole
+  display_name  String
+  active        Boolean  @default(true)
+  created_at    DateTime @default(now())
+  updated_at    DateTime @updatedAt
+
+  // Relations
+  audit_logs AuditLog[]
+
+  @@map("users")
+}
+
+// ============================================================
+// 2. الفنادق
+// ============================================================
+model Hotel {
+  id         String   @id @default(cuid())
+  name       String   @unique
+  name_en    String?
+  code       String   @unique // رمز قصير مثل H1, H2, H3
+  active     Boolean  @default(true)
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  // Relations
+  employees              Employee[]
+  schedule_entries       ScheduleEntry[]
+  punches                Punch[]
+  attendance_sessions    AttendanceSession[]
+  late_claims            LateClaim[]
+  double_events          DoubleEvent[]
+  devices                Device[]
+  allowed_networks       AllowedNetwork[]
+  financial_transactions FinancialTransaction[]
+
+  @@map("hotels")
+}
+
+// ============================================================
+// 3. الموظفون
+// ============================================================
+model Employee {
+  id              String    @id @default(cuid())
+  name            String
+  name_normalized String // بعد تطبيع fn_normalize_arabic
+  pin_hash        String
+  active          Boolean   @default(true)
+  hired_at        DateTime  @db.Date
+  left_at         DateTime? @db.Date
+  notes           String?
+  created_at      DateTime  @default(now())
+  updated_at      DateTime  @updatedAt
+
+  // الفندق الافتراضي (يمكن أن يعمل في فنادق متعددة عبر الجدول)
+  default_hotel_id String?
+  default_hotel    Hotel?  @relation(fields: [default_hotel_id], references: [id])
+
+  // Relations
+  schedule_entries       ScheduleEntry[]
+  punches                Punch[]
+  attendance_sessions    AttendanceSession[]
+  late_claims_as_late    LateClaim[]            @relation("LateClaims_LateEmployee")
+  late_claims_as_wait    LateClaim[]            @relation("LateClaims_WaitEmployee")
+  double_allocations     DoubleAllocation[]
+  double_events          DoubleEvent[]
+  time_compensations     TimeCompensation[]
+  financial_transactions FinancialTransaction[]
+
+  @@map("employees")
+}
+
+// ============================================================
+// 4. الورديات
+// ============================================================
+model Shift {
+  id               String   @id @default(cuid())
+  name             String   @unique
+  start_time       String // "HH:MM" بتوقيت عمّان
+  end_time         String // "HH:MM" بتوقيت عمّان
+  crosses_midnight Boolean  @default(false) // وردية تعبر منتصف الليل
+  duration_minutes Int // محسوب ومخزّن
+  active           Boolean  @default(true)
+  created_at       DateTime @default(now())
+  updated_at       DateTime @updatedAt
+
+  // Relations
+  schedule_entries    ScheduleEntry[]
+  punches             Punch[]
+  attendance_sessions AttendanceSession[]
+  late_claims         LateClaim[]
+  double_events       DoubleEvent[]
+
+  @@map("shifts")
+}
+
+// ============================================================
+// 5. جدول الدوام
+// ============================================================
+model ScheduleEntry {
+  id             String   @id @default(cuid())
+  date           DateTime @db.Date
+  is_day_off     Boolean  @default(false)
+  is_partial     Boolean  @default(false)
+  start_override String? // تجاوز وقت بداية الوردية "HH:MM"
+  end_override   String? // تجاوز وقت نهاية الوردية "HH:MM"
+  notes          String?
+  created_at     DateTime @default(now())
+  updated_at     DateTime @updatedAt
+
+  employee_id String
+  employee    Employee @relation(fields: [employee_id], references: [id])
+
+  hotel_id String
+  hotel    Hotel  @relation(fields: [hotel_id], references: [id])
+
+  shift_id String?
+  shift    Shift?  @relation(fields: [shift_id], references: [id])
+
+  // Relations
+  attendance_sessions AttendanceSession[]
+
+  @@unique([employee_id, date])
+  @@index([date])
+  @@index([employee_id, date])
+  @@map("schedule_entries")
+}
+
+// ============================================================
+// 6. الأجهزة المعتمدة
+// ============================================================
+model Device {
+  id             String    @id @default(cuid())
+  name           String // اسم وصفي "كمبيوتر الاستقبال - فندق 1"
+  token_hash     String    @unique // hash من التوكن الطويل
+  active         Boolean   @default(true)
+  registered_at  DateTime  @default(now())
+  last_seen_at   DateTime?
+  deactivated_at DateTime?
+
+  hotel_id String
+  hotel    Hotel  @relation(fields: [hotel_id], references: [id])
+
+  // Relations
+  punches Punch[]
+
+  @@map("devices")
+}
+
+// ============================================================
+// 7. الشبكات المسموحة
+// ============================================================
+model AllowedNetwork {
+  id          String   @id @default(cuid())
+  cidr        String // مثل "192.168.1.0/24"
+  description String?
+  active      Boolean  @default(true)
+  created_at  DateTime @default(now())
+
+  hotel_id String
+  hotel    Hotel  @relation(fields: [hotel_id], references: [id])
+
+  @@map("allowed_networks")
+}
+
+// ============================================================
+// 8. البصمات
+// ============================================================
+model Punch {
+  id               String      @id @default(cuid())
+  type             PunchType
+  server_timestamp DateTime // UTC دائماً
+  source           PunchSource @default(DEVICE)
+  cancelled_at     DateTime? // إلغاء منطقي فقط، لا حذف
+  cancelled_reason String?
+  created_at       DateTime    @default(now())
+
+  employee_id String
+  employee    Employee @relation(fields: [employee_id], references: [id])
+
+  hotel_id String
+  hotel    Hotel  @relation(fields: [hotel_id], references: [id])
+
+  shift_id String?
+  shift    Shift?  @relation(fields: [shift_id], references: [id])
+
+  device_id String?
+  device    Device? @relation(fields: [device_id], references: [id])
+
+  // للتصحيح: السجل الذي يستبدل هذا السجل
+  superseded_by_id String? @unique
+  superseded_by    Punch?  @relation("PunchSupersedes", fields: [superseded_by_id], references: [id])
+  supersedes       Punch?  @relation("PunchSupersedes")
+
+  @@index([employee_id, server_timestamp])
+  @@index([hotel_id, server_timestamp])
+  @@map("punches")
+}
+
+// ============================================================
+// 9. جلسات الحضور (محسوبة)
+// ============================================================
+model AttendanceSession {
+  id             String           @id @default(cuid())
+  date           DateTime         @db.Date
+  status         AttendanceStatus
+  late_minutes   Int              @default(0)
+  check_in_time  DateTime?
+  check_out_time DateTime?
+  worked_minutes Int?
+  created_at     DateTime         @default(now())
+  updated_at     DateTime         @updatedAt
+
+  employee_id String
+  employee    Employee @relation(fields: [employee_id], references: [id])
+
+  hotel_id String
+  hotel    Hotel  @relation(fields: [hotel_id], references: [id])
+
+  shift_id String?
+  shift    Shift?  @relation(fields: [shift_id], references: [id])
+
+  schedule_entry_id String?
+  schedule_entry    ScheduleEntry? @relation(fields: [schedule_entry_id], references: [id])
+
+  @@unique([employee_id, date])
+  @@index([date])
+  @@map("attendance_sessions")
+}
+
+// ============================================================
+// 10. مطالبات التأخير
+// ============================================================
+model LateClaim {
+  id                String          @id @default(cuid())
+  date              DateTime        @db.Date
+  shift_start       DateTime // وقت بداية الوردية (UTC)
+  actual_arrival    DateTime // وقت الوصول الفعلي (UTC)
+  late_minutes      Int
+  amount            Decimal         @db.Decimal(12, 3) // بالدينار
+  status            LateClaimStatus @default(PENDING)
+  remaining_minutes Int
+  cancelled_at      DateTime?
+  cancelled_reason  String?
+  created_at        DateTime        @default(now())
+  updated_at        DateTime        @updatedAt
+
+  late_employee_id String
+  late_employee    Employee @relation("LateClaims_LateEmployee", fields: [late_employee_id], references: [id])
+
+  waiting_employee_id String
+  waiting_employee    Employee @relation("LateClaims_WaitEmployee", fields: [waiting_employee_id], references: [id])
+
+  hotel_id String
+  hotel    Hotel  @relation(fields: [hotel_id], references: [id])
+
+  shift_id String?
+  shift    Shift?  @relation(fields: [shift_id], references: [id])
+
+  time_compensations     TimeCompensation[]
+  financial_transactions FinancialTransaction[]
+
+  // unique: نفس الحادثة لا تُسجَّل مرتين
+  @@unique([late_employee_id, waiting_employee_id, date, shift_id])
+  @@map("late_claims")
+}
+
+// ============================================================
+// 11. التعويض الزمني
+// ============================================================
+model TimeCompensation {
+  id                  String   @id @default(cuid())
+  compensated_minutes Int
+  notes               String?
+  created_at          DateTime @default(now())
+
+  employee_id String
+  employee    Employee @relation(fields: [employee_id], references: [id])
+
+  late_claim_id String
+  late_claim    LateClaim @relation(fields: [late_claim_id], references: [id])
+
+  @@map("time_compensations")
+}
+
+// ============================================================
+// 12. أحداث الدبل
+// ============================================================
+model DoubleEvent {
+  id           String   @id @default(cuid())
+  date         DateTime @db.Date
+  total_hours  Decimal  @db.Decimal(6, 2)
+  total_amount Decimal  @db.Decimal(12, 3)
+  notes        String?
+  verified     Boolean  @default(false) // مربوط ببصمات فعلية
+  created_at   DateTime @default(now())
+  updated_at   DateTime @updatedAt
+
+  original_employee_id String
+  original_employee    Employee @relation(fields: [original_employee_id], references: [id])
+
+  hotel_id String
+  hotel    Hotel  @relation(fields: [hotel_id], references: [id])
+
+  shift_id String?
+  shift    Shift?  @relation(fields: [shift_id], references: [id])
+
+  // Relations
+  allocations            DoubleAllocation[]
+  financial_transactions FinancialTransaction[]
+
+  @@map("double_events")
+}
+
+// ============================================================
+// 13. توزيع الدبل على الموظفين
+// ============================================================
+model DoubleAllocation {
+  id     String  @id @default(cuid())
+  hours  Decimal @db.Decimal(6, 2)
+  amount Decimal @db.Decimal(12, 3) // hours × 1.25
+
+  employee_id String
+  employee    Employee @relation(fields: [employee_id], references: [id])
+
+  double_event_id String
+  double_event    DoubleEvent @relation(fields: [double_event_id], references: [id])
+
+  created_at DateTime @default(now())
+
+  @@map("double_allocations")
+}
+
+// ============================================================
+// 14. المعاملات المالية
+// ============================================================
+model FinancialTransaction {
+  id               String                   @id @default(cuid())
+  type             FinancialTransactionType
+  amount           Decimal                  @db.Decimal(12, 3)
+  description      String?
+  transaction_date DateTime                 @db.Date
+  created_at       DateTime                 @default(now())
+
+  employee_id String
+  employee    Employee @relation(fields: [employee_id], references: [id])
+
+  hotel_id String?
+  hotel    Hotel?  @relation(fields: [hotel_id], references: [id])
+
+  // ربط بمصدر المعاملة
+  late_claim_id String?
+  late_claim    LateClaim? @relation(fields: [late_claim_id], references: [id])
+
+  double_event_id String?
+  double_event    DoubleEvent? @relation(fields: [double_event_id], references: [id])
+
+  @@index([employee_id, transaction_date])
+  @@map("financial_transactions")
+}
+
+// ============================================================
+// 15. سجل التدقيق (append-only محمي بـ triggers)
+// ============================================================
+model AuditLog {
+  id            String   @id @default(cuid())
+  table_name    String
+  record_id     String
+  action        String // CREATE, UPDATE, CANCEL, CORRECT
+  original_data Json? // البيانات قبل التغيير
+  new_data      Json? // البيانات بعد التغيير
+  reason        String // إلزامي
+  performed_by  String
+  user_id       String?
+  user          User?    @relation(fields: [user_id], references: [id])
+  created_at    DateTime @default(now())
+
+  // لا update، لا delete — محمي بـ triggers
+  @@index([table_name, record_id])
+  @@index([created_at])
+  @@map("audit_log")
+}
+
+// ============================================================
+// 16. حالات الأخطاء
+// ============================================================
+model ErrorCase {
+  id            String        @id @default(cuid())
+  type          ErrorCaseType
+  description   String
+  original_data Json?
+  correction    String?
+  reason        String // إلزامي
+  resolved      Boolean       @default(false)
+  resolved_at   DateTime?
+  created_at    DateTime      @default(now())
+  updated_at    DateTime      @updatedAt
+
+  @@index([resolved, created_at])
+  @@map("error_cases")
+}
