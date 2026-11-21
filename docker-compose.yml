@@ -1,0 +1,53 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: hotel_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-hotel_attendance}
+      POSTGRES_USER: ${POSTGRES_USER:-hotel_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/01-init-db.sql:ro
+    ports:
+      - "5432:5432"
+    networks:
+      - hotel_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-hotel_admin} -d ${POSTGRES_DB:-hotel_attendance}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runner
+    container_name: hotel_app
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-hotel_admin}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hotel_attendance}
+      VIEWER_DATABASE_URL: postgresql://${VIEWER_DB_USER:-viewer_role}:${VIEWER_DB_PASSWORD:?VIEWER_DB_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-hotel_attendance}
+      SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET is required}
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?NEXTAUTH_SECRET is required}
+      NODE_ENV: ${NODE_ENV:-production}
+      TZ: Asia/Amman
+    ports:
+      - "3000:3000"
+    networks:
+      - hotel_net
+
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  hotel_net:
+    driver: bridge
